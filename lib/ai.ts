@@ -1,4 +1,4 @@
-async function callOpenRouter(prompt: string): Promise<string> {
+async function callOpenRouter(systemPrompt: string, prompt: string): Promise<string> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 300000);
 
@@ -11,7 +11,10 @@ async function callOpenRouter(prompt: string): Promise<string> {
     body: JSON.stringify({
       model: "google/gemini-2.0-flash-lite-001",
       max_tokens: 1024,
-      messages: [{ role: "user", content: prompt }],
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: prompt },
+      ],
     }),
     signal: controller.signal,
   });
@@ -56,37 +59,54 @@ export async function generateMealRecipe(
     blood_sugar?: number;
   }
 ) {
-  const prompt = `Create a ${mealType} recipe for someone with these details:
+  const healthConstraints: string[] = [];
+  if (profile.blood_pressure_systolic && profile.blood_pressure_systolic > 130) {
+    healthConstraints.push("- CRITICAL: Use LOW SODIUM ingredients only. No added salt, soy sauce, or cured meats. Blood pressure is elevated.");
+  }
+  if (profile.blood_sugar && profile.blood_sugar > 100) {
+    healthConstraints.push("- CRITICAL: Use LOW GLYCEMIC INDEX ingredients only. No white rice, white bread, or refined sugars. Blood sugar is elevated.");
+  }
 
-Profile:
-- Age: ${profile.age}
-- Gender: ${profile.gender}
-- Current weight: ${profile.weight_kg} kg
-- Height: ${profile.height_cm} cm
-- Goal: ${profile.goal_type} weight
-- Diet type: ${profile.diet_type}
-- Food allergies: ${profile.allergies?.join(", ") || "None"}
-- Location: ${profile.city}, ${profile.country}
-${profile.blood_pressure_systolic ? `- Blood pressure: ${profile.blood_pressure_systolic}/80` : ""}
-${profile.blood_sugar ? `- Blood sugar: ${profile.blood_sugar} mg/dL` : ""}
+  const systemPrompt = `You are a professional nutritionist and chef who specializes in local cuisine from ${profile.city}, ${profile.country}.
 
-Requirements:
-1. Create a healthy ${mealType} recipe suitable for their ${profile.goal_type} weight goal
-2. Follow ${profile.diet_type} diet restrictions
-3. Avoid any listed allergies
-4. Calculate approximate calories and macros (protein, carbs, fat in grams)
-5. Estimate ingredient costs in local currency for ${profile.city}, ${profile.country}
-6. Provide step-by-step cooking instructions
-7. Keep prep time reasonable (under 30 mins for breakfast, under 45 mins for lunch/dinner)
-${profile.blood_pressure_systolic && profile.blood_pressure_systolic > 130 ? "8. Low sodium due to high blood pressure" : ""}
-${profile.blood_sugar && profile.blood_sugar > 100 ? "9. Low glycemic index due to elevated blood sugar" : ""}
+Your expertise:
+- Deep knowledge of ingredients commonly found in local markets, grocery stores, and supermarkets in ${profile.city}, ${profile.country}
+- Understanding of local food culture, seasonal produce, and regional staples
+- Ability to create nutritious meals using locally sourced, easily accessible ingredients
 
-Return ONLY valid JSON in this exact format (no markdown, no code blocks):
+Rules you MUST follow:
+1. ONLY use ingredients that a person in ${profile.city}, ${profile.country} can easily buy at their local market or grocery store
+2. Prefer local staples and regional produce over imported or specialty items
+3. Use local names for ingredients when appropriate, but always include a common English name
+4. Price estimates must reflect actual local market prices in ${profile.city}, ${profile.country}
+5. Return ONLY valid JSON - no markdown, no code blocks, no extra text`;
+
+  const prompt = `Create a ${mealType} recipe for this person:
+
+Person: ${profile.age}-year-old ${profile.gender}, ${profile.weight_kg}kg, ${profile.height_cm}cm
+Goal: ${profile.goal_type} weight
+Diet: ${profile.diet_type}
+Allergies: ${profile.allergies?.join(", ") || "None"}
+Location: ${profile.city}, ${profile.country}
+${healthConstraints.length > 0 ? `\nHealth constraints:\n${healthConstraints.join("\n")}` : ""}
+
+Think step by step:
+1. First, consider what ingredients are commonly available in ${profile.city} markets right now
+2. Then, pick ingredients that fit a ${profile.diet_type} diet and ${profile.goal_type} weight goal
+3. Build a ${mealType} recipe using ONLY those local ingredients
+4. Calculate accurate macros and local pricing
+
+Constraints:
+- Prep time: ${mealType === "breakfast" ? "under 20 minutes" : "under 40 minutes"}
+- Calories: ${profile.goal_type === "lose" ? "300-500" : profile.goal_type === "gain" ? "500-800" : "400-600"} cal range for ${mealType}
+- All ingredients must be available in ${profile.city}, ${profile.country}
+
+Return JSON in this exact format:
 {
   "name": "Recipe Name",
-  "description": "Brief description",
+  "description": "Brief description mentioning local ingredients used",
   "ingredients": [
-    {"name": "ingredient", "amount": "quantity", "cost": "estimated cost in local currency"}
+    {"name": "ingredient", "amount": "quantity", "cost": "price in local currency"}
   ],
   "instructions": ["Step 1", "Step 2"],
   "calories": 500,
@@ -94,11 +114,11 @@ Return ONLY valid JSON in this exact format (no markdown, no code blocks):
   "carbs_g": 50,
   "fat_g": 15,
   "prep_time_mins": 20,
-  "estimated_cost": "total cost with currency",
-  "currency": "USD"
+  "estimated_cost": "total cost with currency symbol",
+  "currency": "LOCAL_CURRENCY_CODE"
 }`;
 
-  const responseText = await callOpenRouter(prompt);
+  const responseText = await callOpenRouter(systemPrompt, prompt);
   return JSON.parse(cleanJsonResponse(responseText));
 }
 
@@ -117,34 +137,68 @@ export async function generateWorkoutPlan(profile: {
   work_start?: string;
   work_end?: string;
 }) {
-  const prompt = `Create a workout plan for someone with these details:
+  const equipmentDescription =
+    profile.equipment === "none"
+      ? "bodyweight exercises only (no equipment)"
+      : profile.equipment === "home"
+      ? "home equipment (dumbbells, resistance bands, yoga mat)"
+      : "full gym equipment (barbells, machines, cables, dumbbells)";
 
-Profile:
-- Age: ${profile.age}
-- Gender: ${profile.gender}
-- Current weight: ${profile.weight_kg} kg
-- Height: ${profile.height_cm} cm
-- Goal: ${profile.goal_type} weight
-- Available equipment: ${profile.equipment}
-- Wake time: ${profile.wake_time}
-- Sleep time: ${profile.sleep_time}
-${profile.work_start ? `- Work hours: ${profile.work_start} - ${profile.work_end}` : ""}
+  // Pre-calculate available time windows so the AI doesn't have to guess
+  const freeWindows: string[] = [];
+  if (profile.work_start) {
+    freeWindows.push(`Morning free window: ${profile.wake_time} to ${profile.work_start}`);
+    freeWindows.push(`Evening free window: ${profile.work_end} to ${profile.sleep_time}`);
+  } else {
+    freeWindows.push(`Full day free window: ${profile.wake_time} to ${profile.sleep_time}`);
+  }
 
-Requirements:
-1. Create a workout suitable for their ${profile.goal_type} weight goal
-2. Use only: ${profile.equipment === "none" ? "bodyweight exercises" : profile.equipment === "home" ? "home equipment (dumbbells, resistance bands)" : "full gym equipment"}
-3. Duration: 30-45 minutes
-4. Include warm-up and cool-down
-5. Suggest best time to exercise based on their schedule
-6. Provide sets, reps, and rest times for each exercise
+  const systemPrompt = `You are a certified personal trainer creating workout plans.
 
-Return ONLY valid JSON in this exact format (no markdown, no code blocks):
+CRITICAL SCHEDULING RULES - NEVER VIOLATE THESE:
+- This person wakes up at ${profile.wake_time} and sleeps at ${profile.sleep_time}
+${profile.work_start ? `- They work from ${profile.work_start} to ${profile.work_end}` : "- They have no fixed work schedule"}
+- The workout MUST be scheduled AFTER ${profile.wake_time} (wake time)
+- The workout MUST END BEFORE ${profile.sleep_time} (sleep time)
+${profile.work_start ? `- The workout must NOT overlap with work hours (${profile.work_start} - ${profile.work_end})` : ""}
+- Allow at least 30 minutes after wake time before intense exercise
+- The "best_time" field MUST be a specific time like "07:00 AM" that falls within a free window
+
+Available free windows for exercise:
+${freeWindows.join("\n")}
+
+Return ONLY valid JSON - no markdown, no code blocks, no extra text.`;
+
+  const prompt = `Create a workout plan for this person:
+
+Person: ${profile.age}-year-old ${profile.gender}, ${profile.weight_kg}kg, ${profile.height_cm}cm
+Goal: ${profile.goal_type} weight
+Equipment: ${equipmentDescription}
+
+Schedule:
+- Wakes up: ${profile.wake_time}
+- Sleeps: ${profile.sleep_time}
+${profile.work_start ? `- Works: ${profile.work_start} to ${profile.work_end}` : "- No fixed work hours"}
+
+Think step by step:
+1. Calculate the free time windows: ${freeWindows.join(", ")}
+2. Pick the best window that fits a 30-45 min workout (prefer morning if enough time before work)
+3. Verify the chosen time is AFTER ${profile.wake_time} and does NOT overlap with work hours
+4. Design exercises appropriate for ${profile.goal_type} goal using ${equipmentDescription}
+
+Constraints:
+- Duration: 30-45 minutes total (including warmup and cooldown)
+- best_time must be a specific clock time (e.g. "07:00 AM") within a free window
+- Include 5 min warmup and 5 min cooldown
+- ${profile.goal_type === "lose" ? "Focus on cardio and high-intensity intervals for fat burning" : profile.goal_type === "gain" ? "Focus on strength training with progressive overload" : "Balance of cardio and strength for overall fitness"}
+
+Return JSON in this exact format:
 {
   "name": "Workout Name",
   "description": "Brief description",
   "duration_mins": 40,
   "difficulty": "beginner|intermediate|advanced",
-  "best_time": "suggested time based on schedule",
+  "best_time": "HH:MM AM/PM - must be within a free window",
   "warmup": [
     {"exercise": "name", "duration": "5 mins"}
   ],
@@ -156,6 +210,6 @@ Return ONLY valid JSON in this exact format (no markdown, no code blocks):
   ]
 }`;
 
-  const responseText = await callOpenRouter(prompt);
+  const responseText = await callOpenRouter(systemPrompt, prompt);
   return JSON.parse(cleanJsonResponse(responseText));
 }
