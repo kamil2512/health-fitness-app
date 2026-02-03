@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run dev)",
+      "Bash(timeout:*)",
+      "Bash(taskkill:*)",
+      "Bash(dir:*)",
+      "Bash(findstr:*)",
+      "Bash(npm uninstall @google/generative-ai)",
+      "Bash(npm install @anthropic-ai/sdk)",
+      "Bash(npm run build:*)",
+      "Bash(curl:*)",
+      "Bash(npx kill-port:*)",
+      "Bash(cmd //c \"taskkill /PID 16824 /F\")"
+    ]
+  },
+  "enabledPlugins": {
+    "frontend-design@claude-plugins-official": true
+  }
+}
